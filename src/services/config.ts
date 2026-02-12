@@ -5,9 +5,16 @@ const CONFIG_DIR = path.join(process.env.HOME || "/tmp", ".claude-quota");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
 const STATE_FILE = path.join(CONFIG_DIR, "alert-state.json");
 
+export interface OpenAIConfig {
+  accessToken: string;
+  refreshToken: string;
+  accountId?: string;
+}
+
 export interface Config {
-  sessionKey: string;
-  organizationId: string;
+  sessionKey?: string;
+  organizationId?: string;
+  openai?: OpenAIConfig;
   discordWebhook?: string;
   discordWebhooks?: string[];
 }

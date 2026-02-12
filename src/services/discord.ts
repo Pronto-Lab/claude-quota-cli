@@ -1,4 +1,5 @@
-import type { ModelQuota, QuotaSnapshot } from "./quota-client.js";
+import type { ModelQuota, QuotaSnapshot, CombinedQuotaSnapshot } from "./quota-client.js";
+import type { OpenAIModelQuota, OpenAIQuotaSnapshot } from "./openai-quota-client.js";
 
 const THRESHOLDS = [80, 60, 40, 20];
 
@@ -36,6 +37,14 @@ async function postToWebhooks(
   }
 }
 
+function getAlertStyle(threshold: number): { color: number; emoji: string } {
+  if (threshold >= 80) return { color: 0xff0000, emoji: "🔴" };
+  if (threshold >= 60) return { color: 0xff8c00, emoji: "🟠" };
+  if (threshold >= 40) return { color: 0xffd700, emoji: "🟡" };
+  return { color: 0x00ff00, emoji: "🟢" };
+}
+
+// Claude alert
 export async function sendDiscordAlert(
   webhookUrls: string | string[],
   quota: ModelQuota,
@@ -43,41 +52,14 @@ export async function sendDiscordAlert(
   snapshot?: QuotaSnapshot,
 ): Promise<void> {
   const urls = Array.isArray(webhookUrls) ? webhookUrls : [webhookUrls];
-  let color: number;
-  let emoji: string;
-
-  if (threshold >= 80) {
-    color = 0xff0000;
-    emoji = "🔴";
-  } else if (threshold >= 60) {
-    color = 0xff8c00;
-    emoji = "🟠";
-  } else if (threshold >= 40) {
-    color = 0xffd700;
-    emoji = "🟡";
-  } else {
-    color = 0x00ff00;
-    emoji = "🟢";
-  }
+  const { color, emoji } = getAlertStyle(threshold);
 
   const periodLabel = quota.period === "5-hour" ? "5시간" : "7일";
 
   const fields: Array<{ name: string; value: string; inline: boolean }> = [
-    {
-      name: "구간",
-      value: periodLabel,
-      inline: true,
-    },
-    {
-      name: "사용량",
-      value: `${quota.utilization.toFixed(1)}%`,
-      inline: true,
-    },
-    {
-      name: "리셋까지",
-      value: quota.timeUntilResetFormatted,
-      inline: true,
-    },
+    { name: "구간", value: periodLabel, inline: true },
+    { name: "사용량", value: `${quota.utilization.toFixed(1)}%`, inline: true },
+    { name: "리셋까지", value: quota.timeUntilResetFormatted, inline: true },
     { name: "리셋 시각", value: quota.resetTimeDisplay, inline: true },
   ];
 
@@ -85,21 +67,9 @@ export async function sendDiscordAlert(
     const sd = snapshot.sevenDay;
     fields.push(
       { name: "\u200B", value: "**── 주간 현황 ──**", inline: false },
-      {
-        name: "주간 사용량",
-        value: `${sd.utilization.toFixed(1)}%`,
-        inline: true,
-      },
-      {
-        name: "주간 리셋까지",
-        value: sd.timeUntilResetFormatted,
-        inline: true,
-      },
-      {
-        name: "주간 리셋 시각",
-        value: formatDateTimeKST(sd.resetTime),
-        inline: true,
-      },
+      { name: "주간 사용량", value: `${sd.utilization.toFixed(1)}%`, inline: true },
+      { name: "주간 리셋까지", value: sd.timeUntilResetFormatted, inline: true },
+      { name: "주간 리셋 시각", value: formatDateTimeKST(sd.resetTime), inline: true },
     );
   }
 
@@ -114,65 +84,120 @@ export async function sendDiscordAlert(
   await postToWebhooks(urls, { embeds: [embed] });
 }
 
+// OpenAI alert
+export async function sendOpenAIDiscordAlert(
+  webhookUrls: string | string[],
+  quota: OpenAIModelQuota,
+  threshold: number,
+  snapshot?: OpenAIQuotaSnapshot,
+): Promise<void> {
+  const urls = Array.isArray(webhookUrls) ? webhookUrls : [webhookUrls];
+  const { color, emoji } = getAlertStyle(threshold);
+
+  const fields: Array<{ name: string; value: string; inline: boolean }> = [
+    { name: "구간", value: quota.period, inline: true },
+    { name: "사용량", value: `${quota.utilization.toFixed(1)}%`, inline: true },
+    { name: "리셋까지", value: quota.timeUntilResetFormatted, inline: true },
+    { name: "리셋 시각", value: quota.resetTimeDisplay, inline: true },
+  ];
+
+  if (snapshot) {
+    const other = quota.period.includes("hour")
+      ? snapshot.secondary
+      : snapshot.primary;
+    if (other) {
+      fields.push(
+        { name: "\u200B", value: `**── ${other.period} 현황 ──**`, inline: false },
+        { name: `${other.period} 사용량`, value: `${other.utilization.toFixed(1)}%`, inline: true },
+        { name: `${other.period} 리셋까지`, value: other.timeUntilResetFormatted, inline: true },
+        { name: `${other.period} 리셋 시각`, value: formatDateTimeKST(other.resetTime), inline: true },
+      );
+    }
+  }
+
+  const planLabel = snapshot?.planType ? ` (${snapshot.planType})` : "";
+  const embed = {
+    title: `${emoji} OpenAI Quota Alert${planLabel}`,
+    description: `${quota.period} 사용량이 **${threshold}%**를 초과했습니다`,
+    color,
+    fields,
+    timestamp: new Date().toISOString(),
+  };
+
+  await postToWebhooks(urls, { embeds: [embed] });
+}
+
+// Combined daily report
 export async function sendDailyReport(
   webhookUrls: string | string[],
-  snapshot: QuotaSnapshot,
+  combined: CombinedQuotaSnapshot,
 ): Promise<void> {
   const urls = Array.isArray(webhookUrls) ? webhookUrls : [webhookUrls];
   const fields: Array<{ name: string; value: string; inline: boolean }> = [];
 
-  if (snapshot.fiveHour) {
-    const fh = snapshot.fiveHour;
-    const bar = makeBar(fh.utilization);
-    fields.push(
-      {
-        name: "⏱️ 5시간 사용량",
-        value: `${bar} **${fh.utilization.toFixed(1)}%**`,
-        inline: false,
-      },
-      {
-        name: "리셋까지",
-        value: fh.timeUntilResetFormatted,
-        inline: true,
-      },
-      {
-        name: "리셋 시각",
-        value: fh.resetTimeDisplay,
-        inline: true,
-      },
-      { name: "\u200B", value: "\u200B", inline: true },
-    );
+  // Claude section
+  const claude = combined.claude;
+  if (claude) {
+    fields.push({ name: "☁️ **Claude**", value: "\u200B", inline: false });
+
+    if (claude.fiveHour) {
+      const fh = claude.fiveHour;
+      const bar = makeBar(fh.utilization);
+      fields.push(
+        { name: "⏱️ 5시간 사용량", value: `${bar} **${fh.utilization.toFixed(1)}%**`, inline: false },
+        { name: "리셋까지", value: fh.timeUntilResetFormatted, inline: true },
+        { name: "리셋 시각", value: fh.resetTimeDisplay, inline: true },
+        { name: "\u200B", value: "\u200B", inline: true },
+      );
+    }
+
+    if (claude.sevenDay) {
+      const sd = claude.sevenDay;
+      const bar = makeBar(sd.utilization);
+      fields.push(
+        { name: "📅 주간 사용량", value: `${bar} **${sd.utilization.toFixed(1)}%**`, inline: false },
+        { name: "리셋까지", value: sd.timeUntilResetFormatted, inline: true },
+        { name: "리셋 시각", value: formatDateTimeKST(sd.resetTime), inline: true },
+        { name: "\u200B", value: "\u200B", inline: true },
+      );
+    }
   }
 
-  if (snapshot.sevenDay) {
-    const sd = snapshot.sevenDay;
-    const bar = makeBar(sd.utilization);
-    fields.push(
-      {
-        name: "📅 주간 사용량",
-        value: `${bar} **${sd.utilization.toFixed(1)}%**`,
-        inline: false,
-      },
-      {
-        name: "리셋까지",
-        value: sd.timeUntilResetFormatted,
-        inline: true,
-      },
-      {
-        name: "리셋 시각",
-        value: formatDateTimeKST(sd.resetTime),
-        inline: true,
-      },
-      { name: "\u200B", value: "\u200B", inline: true },
-    );
+  // OpenAI section
+  const openai = combined.openai;
+  if (openai) {
+    const planLabel = openai.planType ? ` (${openai.planType})` : "";
+    fields.push({ name: `🤖 **OpenAI Codex${planLabel}**`, value: "\u200B", inline: false });
+
+    if (openai.primary) {
+      const p = openai.primary;
+      const bar = makeBar(p.utilization);
+      fields.push(
+        { name: `⏱️ ${p.period} 사용량`, value: `${bar} **${p.utilization.toFixed(1)}%**`, inline: false },
+        { name: "리셋까지", value: p.timeUntilResetFormatted, inline: true },
+        { name: "리셋 시각", value: p.resetTimeDisplay, inline: true },
+        { name: "\u200B", value: "\u200B", inline: true },
+      );
+    }
+
+    if (openai.secondary) {
+      const s = openai.secondary;
+      const bar = makeBar(s.utilization);
+      fields.push(
+        { name: `📅 ${s.period} 사용량`, value: `${bar} **${s.utilization.toFixed(1)}%**`, inline: false },
+        { name: "리셋까지", value: s.timeUntilResetFormatted, inline: true },
+        { name: "리셋 시각", value: formatDateTimeKST(s.resetTime), inline: true },
+        { name: "\u200B", value: "\u200B", inline: true },
+      );
+    }
   }
 
   const embed = {
-    title: "📊 Claude Daily Quota Report",
+    title: "📊 AI Quota Daily Report",
     description: `일일 현황 리포트 — ${formatDateKST(new Date())}`,
     color: 0x5865f2,
     fields,
-    footer: { text: "claude-quota-cli" },
+    footer: { text: "ai-quota-cli" },
     timestamp: new Date().toISOString(),
   };
 

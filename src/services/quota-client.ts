@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext } from "playwright-core";
+import type { OpenAIQuotaSnapshot } from "./openai-quota-client.js";
 
 export interface UsageWindow {
   utilization: number;
@@ -23,6 +24,12 @@ export interface ModelQuota {
 export interface QuotaSnapshot {
   fiveHour: ModelQuota | null;
   sevenDay: ModelQuota | null;
+  timestamp: Date;
+}
+
+export interface CombinedQuotaSnapshot {
+  claude?: QuotaSnapshot;
+  openai?: OpenAIQuotaSnapshot;
   timestamp: Date;
 }
 

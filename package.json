@@ -1,9 +1,10 @@
 {
-  "name": "@pronto-lab/claude-quota-cli",
-  "version": "1.0.0",
-  "description": "CLI tool for monitoring Claude AI subscription quotas",
+  "name": "@pronto-lab/ai-quota-cli",
+  "version": "2.0.0",
+  "description": "CLI tool for monitoring AI subscription quotas (Claude, OpenAI)",
   "type": "module",
   "bin": {
+    "ai-quota": "./dist/cli.js",
     "claude-quota": "./dist/cli.js"
   },
   "scripts": {
@@ -15,6 +16,8 @@
   "keywords": [
     "claude",
     "anthropic",
+    "openai",
+    "codex",
     "quota",
     "usage",
     "cli"

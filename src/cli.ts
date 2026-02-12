@@ -18,9 +18,16 @@ import {
   QuotaClient,
   type QuotaSnapshot,
   type ModelQuota,
+  type CombinedQuotaSnapshot,
 } from "./services/quota-client.js";
 import {
+  OpenAIQuotaClient,
+  type OpenAIQuotaSnapshot,
+  type OpenAIModelQuota,
+} from "./services/openai-quota-client.js";
+import {
   sendDiscordAlert,
+  sendOpenAIDiscordAlert,
   sendDailyReport,
   getThresholdForPercentage,
 } from "./services/discord.js";
@@ -28,23 +35,29 @@ import {
 const program = new Command();
 
 program
-  .name("claude-quota")
-  .description("CLI tool for monitoring Claude AI subscription quotas")
-  .version("1.0.0");
+  .name("ai-quota")
+  .description("CLI tool for monitoring AI subscription quotas (Claude, OpenAI)")
+  .version("2.0.0");
 
 program
   .command("config")
   .description("Configure credentials")
-  .requiredOption("--session-key <key>", "Claude.ai sessionKey cookie value")
-  .requiredOption("--org-id <id>", "Claude.ai organization ID")
+  .option("--session-key <key>", "Claude.ai sessionKey cookie value")
+  .option("--org-id <id>", "Claude.ai organization ID")
+  .option("--openai-token <token>", "OpenAI OAuth access token")
+  .option("--openai-refresh-token <token>", "OpenAI OAuth refresh token")
+  .option("--openai-account-id <id>", "ChatGPT account ID (optional)")
   .option("--webhook <url>", "Discord webhook URL for alerts")
   .option("--webhook-add <url>", "Add an additional Discord webhook URL")
   .option("--webhook-remove <url>", "Remove a Discord webhook URL")
   .option("--webhook-list", "List configured webhook URLs")
   .action(
     (options: {
-      sessionKey: string;
-      orgId: string;
+      sessionKey?: string;
+      orgId?: string;
+      openaiToken?: string;
+      openaiRefreshToken?: string;
+      openaiAccountId?: string;
       webhook?: string;
       webhookAdd?: string;
       webhookRemove?: string;
@@ -72,16 +85,42 @@ program
       const webhookArray = [...webhooks];
 
       const config: Config = {
-        sessionKey: options.sessionKey,
-        organizationId: options.orgId,
-        ...(webhookArray.length > 0
-          ? { discordWebhooks: webhookArray }
-          : {}),
+        ...existing,
+        ...(options.sessionKey ? { sessionKey: options.sessionKey } : {}),
+        ...(options.orgId ? { organizationId: options.orgId } : {}),
+        ...(webhookArray.length > 0 ? { discordWebhooks: webhookArray } : {}),
       };
+
+      if (options.openaiToken && options.openaiRefreshToken) {
+        config.openai = {
+          accessToken: options.openaiToken,
+          refreshToken: options.openaiRefreshToken,
+          ...(options.openaiAccountId
+            ? { accountId: options.openaiAccountId }
+            : {}),
+        };
+      } else if (options.openaiToken || options.openaiRefreshToken) {
+        console.error(
+          chalk.red(
+            "Both --openai-token and --openai-refresh-token are required together.",
+          ),
+        );
+        process.exit(1);
+      }
+
       saveConfig(config);
       console.log(chalk.green("✓ Configuration saved to " + getConfigPath()));
+
+      if (config.sessionKey) {
+        console.log(chalk.gray("  Claude: configured"));
+      }
+      if (config.openai) {
+        console.log(chalk.gray("  OpenAI: configured"));
+      }
       if (webhookArray.length > 0) {
-        console.log(chalk.gray(`  ${webhookArray.length} webhook(s) configured`));
+        console.log(
+          chalk.gray(`  ${webhookArray.length} webhook(s) configured`),
+        );
       }
     },
   );
@@ -90,91 +129,158 @@ program
   .command("status")
   .description("Show current quota status")
   .option("-j, --json", "Output as JSON")
-  .action(async (options: { json?: boolean }) => {
-    const config = loadConfig();
-    if (!config) {
-      console.error(
-        chalk.red(
-          "Not configured. Run: claude-quota config --session-key <key> --org-id <id>",
-        ),
-      );
-      process.exit(1);
-    }
-
-    const spinner = ora("Fetching quota data...").start();
-    const client = new QuotaClient(config.sessionKey, config.organizationId);
-
-    try {
-      const snapshot = await client.fetchQuota();
-      spinner.stop();
-
-      if (options.json) {
-        console.log(JSON.stringify(snapshot, null, 2));
-      } else {
-        displayQuotaTable(snapshot);
-      }
-    } catch (error) {
-      spinner.fail(
-        chalk.red(`Error: ${error instanceof Error ? error.message : error}`),
-      );
-      process.exit(1);
-    } finally {
-      await client.dispose();
-    }
-  });
-
-program
-  .command("watch")
-  .description("Watch mode - refresh periodically")
-  .option(
-    "-i, --interval <seconds>",
-    "Refresh interval in seconds",
-    "60",
-  )
-  .action(async (options: { interval: string }) => {
-    const config = loadConfig();
-    if (!config) {
-      console.error(chalk.red("Not configured."));
-      process.exit(1);
-    }
-
-    const intervalMs = parseInt(options.interval) * 1000;
-    console.log(
-      chalk.gray(
-        `Watch mode (refreshing every ${options.interval}s). Ctrl+C to exit.\n`,
-      ),
-    );
-
-    const client = new QuotaClient(config.sessionKey, config.organizationId);
-
-    const refresh = async () => {
-      try {
-        const snapshot = await client.fetchQuota();
-        console.clear();
-        console.log(
-          chalk.gray(
-            `Last updated: ${new Date().toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul" })}\n`,
+  .option("--claude-only", "Show Claude only")
+  .option("--openai-only", "Show OpenAI only")
+  .action(
+    async (options: {
+      json?: boolean;
+      claudeOnly?: boolean;
+      openaiOnly?: boolean;
+    }) => {
+      const config = loadConfig();
+      if (!config) {
+        console.error(
+          chalk.red(
+            "Not configured. Run: ai-quota config --session-key <key> --org-id <id>",
           ),
         );
-        displayQuotaTable(snapshot);
+        process.exit(1);
+      }
+
+      const spinner = ora("Fetching quota data...").start();
+      const combined: CombinedQuotaSnapshot = { timestamp: new Date() };
+      let claudeClient: QuotaClient | null = null;
+      let openaiClient: OpenAIQuotaClient | null = null;
+
+      try {
+        const hasClaude = config.sessionKey && config.organizationId;
+        const hasOpenAI = config.openai?.accessToken && config.openai?.refreshToken;
+
+        if (hasClaude && !options.openaiOnly) {
+          claudeClient = new QuotaClient(
+            config.sessionKey!,
+            config.organizationId!,
+          );
+          combined.claude = await claudeClient.fetchQuota();
+        }
+
+        if (hasOpenAI && !options.claudeOnly) {
+          openaiClient = new OpenAIQuotaClient(
+            config.openai!.accessToken,
+            config.openai!.refreshToken,
+            config.openai!.accountId,
+          );
+          combined.openai = await openaiClient.fetchQuota();
+        }
+
+        spinner.stop();
+
+        if (!combined.claude && !combined.openai) {
+          console.error(
+            chalk.red("No providers configured or selected."),
+          );
+          process.exit(1);
+        }
+
+        if (options.json) {
+          console.log(JSON.stringify(combined, null, 2));
+        } else {
+          if (combined.claude) displayClaudeQuotaTable(combined.claude);
+          if (combined.openai) displayOpenAIQuotaTable(combined.openai);
+        }
       } catch (error) {
-        console.error(
+        spinner.fail(
           chalk.red(
             `Error: ${error instanceof Error ? error.message : error}`,
           ),
         );
+        process.exit(1);
+      } finally {
+        await claudeClient?.dispose();
+        await openaiClient?.dispose();
       }
-    };
+    },
+  );
 
-    await refresh();
-    const timer = setInterval(refresh, intervalMs);
+program
+  .command("watch")
+  .description("Watch mode - refresh periodically")
+  .option("-i, --interval <seconds>", "Refresh interval in seconds", "60")
+  .option("--claude-only", "Watch Claude only")
+  .option("--openai-only", "Watch OpenAI only")
+  .action(
+    async (options: {
+      interval: string;
+      claudeOnly?: boolean;
+      openaiOnly?: boolean;
+    }) => {
+      const config = loadConfig();
+      if (!config) {
+        console.error(chalk.red("Not configured."));
+        process.exit(1);
+      }
 
-    process.on("SIGINT", async () => {
-      clearInterval(timer);
-      await client.dispose();
-      process.exit(0);
-    });
-  });
+      const intervalMs = parseInt(options.interval) * 1000;
+      console.log(
+        chalk.gray(
+          `Watch mode (refreshing every ${options.interval}s). Ctrl+C to exit.\n`,
+        ),
+      );
+
+      const hasClaude = config.sessionKey && config.organizationId;
+      const hasOpenAI =
+        config.openai?.accessToken && config.openai?.refreshToken;
+
+      const claudeClient =
+        hasClaude && !options.openaiOnly
+          ? new QuotaClient(config.sessionKey!, config.organizationId!)
+          : null;
+      const openaiClient =
+        hasOpenAI && !options.claudeOnly
+          ? new OpenAIQuotaClient(
+              config.openai!.accessToken,
+              config.openai!.refreshToken,
+              config.openai!.accountId,
+            )
+          : null;
+
+      const refresh = async () => {
+        try {
+          console.clear();
+          console.log(
+            chalk.gray(
+              `Last updated: ${new Date().toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul" })}\n`,
+            ),
+          );
+
+          if (claudeClient) {
+            const snapshot = await claudeClient.fetchQuota();
+            displayClaudeQuotaTable(snapshot);
+          }
+          if (openaiClient) {
+            const snapshot = await openaiClient.fetchQuota();
+            displayOpenAIQuotaTable(snapshot);
+          }
+        } catch (error) {
+          console.error(
+            chalk.red(
+              `Error: ${error instanceof Error ? error.message : error}`,
+            ),
+          );
+        }
+      };
+
+      await refresh();
+      const timer = setInterval(refresh, intervalMs);
+
+      process.on("SIGINT", async () => {
+        clearInterval(timer);
+        await claudeClient?.dispose();
+        await openaiClient?.dispose();
+        process.exit(0);
+      });
+    },
+  );
 
 program
   .command("monitor")
@@ -206,7 +312,8 @@ program
 
       const webhookUrls = getWebhookUrls(config);
       if (options.webhook) webhookUrls.push(options.webhook);
-      if (process.env.DISCORD_WEBHOOK) webhookUrls.push(process.env.DISCORD_WEBHOOK);
+      if (process.env.DISCORD_WEBHOOK)
+        webhookUrls.push(process.env.DISCORD_WEBHOOK);
       const uniqueUrls = [...new Set(webhookUrls)];
       if (uniqueUrls.length === 0) {
         console.error(
@@ -222,13 +329,26 @@ program
         console.log(chalk.green("Alert state reset."));
       }
 
-      const client = new QuotaClient(config.sessionKey, config.organizationId);
+      const hasClaude = config.sessionKey && config.organizationId;
+      const hasOpenAI =
+        config.openai?.accessToken && config.openai?.refreshToken;
+
+      const claudeClient = hasClaude
+        ? new QuotaClient(config.sessionKey!, config.organizationId!)
+        : null;
+      const openaiClient = hasOpenAI
+        ? new OpenAIQuotaClient(
+            config.openai!.accessToken,
+            config.openai!.refreshToken,
+            config.openai!.accountId,
+          )
+        : null;
 
       const dailyReportHour = parseInt(options.dailyReportHour);
       let lastDailyReportDate = "";
 
       const checkDailyReport = async (
-        snapshot: import("./services/quota-client.js").QuotaSnapshot,
+        combined: CombinedQuotaSnapshot,
         timestamp: string,
       ) => {
         const now = new Date();
@@ -249,7 +369,7 @@ program
             chalk.gray(`[${timestamp}]`),
             chalk.blue("Sending daily report..."),
           );
-          await sendDailyReport(uniqueUrls, snapshot);
+          await sendDailyReport(uniqueUrls, combined);
           console.log(
             chalk.gray(`[${timestamp}]`),
             chalk.blue("Daily report sent."),
@@ -263,39 +383,90 @@ program
         });
 
         try {
-          const snapshot = await client.fetchQuota();
           const state = loadAlertState();
           let alertsSent = 0;
+          const combined: CombinedQuotaSnapshot = { timestamp: new Date() };
 
-          for (const quota of [snapshot.fiveHour, snapshot.sevenDay]) {
-            if (!quota) continue;
+          if (claudeClient) {
+            const snapshot = await claudeClient.fetchQuota();
+            combined.claude = snapshot;
 
-            const threshold = getThresholdForPercentage(quota.utilization);
-            if (threshold === null) continue;
+            for (const quota of [snapshot.fiveHour, snapshot.sevenDay]) {
+              if (!quota) continue;
 
-            const alertedThresholds = state[quota.period] || [];
+              const threshold = getThresholdForPercentage(quota.utilization);
+              if (threshold === null) continue;
 
-            if (!alertedThresholds.includes(threshold)) {
-              console.log(
-                chalk.gray(`[${timestamp}]`),
-                chalk.yellow(
-                  `Alert: ${quota.period} at ${quota.utilization.toFixed(1)}% (threshold: ${threshold}%)`,
-                ),
-              );
+              const stateKey = `claude:${quota.period}`;
+              const alertedThresholds = state[stateKey] || [];
 
-              await sendDiscordAlert(uniqueUrls, quota, threshold, snapshot);
-              state[quota.period] = [...alertedThresholds, threshold];
-              alertsSent++;
+              if (!alertedThresholds.includes(threshold)) {
+                console.log(
+                  chalk.gray(`[${timestamp}]`),
+                  chalk.yellow(
+                    `Claude alert: ${quota.period} at ${quota.utilization.toFixed(1)}% (threshold: ${threshold}%)`,
+                  ),
+                );
+
+                await sendDiscordAlert(
+                  uniqueUrls,
+                  quota,
+                  threshold,
+                  snapshot,
+                );
+                state[stateKey] = [...alertedThresholds, threshold];
+                alertsSent++;
+              }
+
+              if (quota.utilization < 20) {
+                state[stateKey] = [];
+              }
             }
+          }
 
-            if (quota.utilization < 20) {
-              state[quota.period] = [];
+          if (openaiClient) {
+            const snapshot = await openaiClient.fetchQuota();
+            combined.openai = snapshot;
+
+            for (const [key, quota] of [
+              ["primary", snapshot.primary] as const,
+              ["secondary", snapshot.secondary] as const,
+            ]) {
+              if (!quota) continue;
+
+              const threshold = getThresholdForPercentage(quota.utilization);
+              if (threshold === null) continue;
+
+              const stateKey = `openai:${key}`;
+              const alertedThresholds = state[stateKey] || [];
+
+              if (!alertedThresholds.includes(threshold)) {
+                console.log(
+                  chalk.gray(`[${timestamp}]`),
+                  chalk.yellow(
+                    `OpenAI alert: ${quota.period} at ${quota.utilization.toFixed(1)}% (threshold: ${threshold}%)`,
+                  ),
+                );
+
+                await sendOpenAIDiscordAlert(
+                  uniqueUrls,
+                  quota,
+                  threshold,
+                  snapshot,
+                );
+                state[stateKey] = [...alertedThresholds, threshold];
+                alertsSent++;
+              }
+
+              if (quota.utilization < 20) {
+                state[stateKey] = [];
+              }
             }
           }
 
           saveAlertState(state);
 
-          await checkDailyReport(snapshot, timestamp);
+          await checkDailyReport(combined, timestamp);
 
           if (alertsSent === 0) {
             console.log(
@@ -313,14 +484,18 @@ program
 
       if (options.once) {
         await runOnce();
-        await client.dispose();
+        await claudeClient?.dispose();
+        await openaiClient?.dispose();
         return;
       }
 
       const intervalMs = parseInt(options.interval) * 60 * 1000;
+      const providers: string[] = [];
+      if (claudeClient) providers.push("Claude");
+      if (openaiClient) providers.push("OpenAI");
       console.log(
         chalk.cyan(
-          `🔍 Monitoring quotas (every ${options.interval} min, daily report at ${dailyReportHour}:00 KST). Ctrl+C to exit.`,
+          `🔍 Monitoring ${providers.join(" + ")} quotas (every ${options.interval} min, daily report at ${dailyReportHour}:00 KST). Ctrl+C to exit.`,
         ),
       );
 
@@ -329,15 +504,28 @@ program
 
       process.on("SIGINT", async () => {
         clearInterval(timer);
-        await client.dispose();
+        await claudeClient?.dispose();
+        await openaiClient?.dispose();
         process.exit(0);
       });
     },
   );
 
-function displayQuotaTable(snapshot: QuotaSnapshot): void {
+function displayClaudeQuotaTable(snapshot: QuotaSnapshot): void {
   console.log(chalk.bold.cyan("\n☁️  Claude Quota Status\n"));
+  displayProviderTable([snapshot.fiveHour, snapshot.sevenDay], snapshot.timestamp);
+}
 
+function displayOpenAIQuotaTable(snapshot: OpenAIQuotaSnapshot): void {
+  const planLabel = snapshot.planType ? ` (${snapshot.planType})` : "";
+  console.log(chalk.bold.green(`\n🤖  OpenAI Codex Quota Status${planLabel}\n`));
+  displayProviderTable([snapshot.primary, snapshot.secondary], snapshot.timestamp);
+}
+
+function displayProviderTable(
+  quotas: Array<ModelQuota | OpenAIModelQuota | null>,
+  timestamp: Date,
+): void {
   const table = new Table({
     head: [
       chalk.white("Window"),
@@ -348,7 +536,7 @@ function displayQuotaTable(snapshot: QuotaSnapshot): void {
     style: { head: [], border: ["gray"] },
   });
 
-  for (const quota of [snapshot.fiveHour, snapshot.sevenDay]) {
+  for (const quota of quotas) {
     if (!quota) continue;
 
     const pct = quota.utilization;
@@ -379,7 +567,7 @@ function displayQuotaTable(snapshot: QuotaSnapshot): void {
   console.log(table.toString());
   console.log(
     chalk.gray(
-      `\n  Updated: ${snapshot.timestamp.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul" })}`,
+      `\n  Updated: ${timestamp.toLocaleTimeString("ko-KR", { timeZone: "Asia/Seoul" })}`,
     ),
   );
   console.log();
