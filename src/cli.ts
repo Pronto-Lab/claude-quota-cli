@@ -20,6 +20,7 @@ import {
 } from "./services/quota-client.js";
 import {
   sendDiscordAlert,
+  sendDailyReport,
   getThresholdForPercentage,
 } from "./services/discord.js";
 
@@ -151,12 +152,18 @@ program
   .option("--interval <minutes>", "Check interval in minutes", "5")
   .option("--once", "Run once and exit (for cron)")
   .option("--reset-state", "Reset alert state")
+  .option(
+    "--daily-report-hour <hour>",
+    "Send daily report at this hour (0-23, KST)",
+    "9",
+  )
   .action(
     async (options: {
       webhook?: string;
       interval: string;
       once?: boolean;
       resetState?: boolean;
+      dailyReportHour: string;
     }) => {
       const config = loadConfig();
       if (!config) {
@@ -181,6 +188,39 @@ program
       }
 
       const client = new QuotaClient(config.sessionKey, config.organizationId);
+
+      const dailyReportHour = parseInt(options.dailyReportHour);
+      let lastDailyReportDate = "";
+
+      const checkDailyReport = async (
+        snapshot: import("./services/quota-client.js").QuotaSnapshot,
+        timestamp: string,
+      ) => {
+        const now = new Date();
+        const kstHour = parseInt(
+          now.toLocaleString("en-US", {
+            hour: "numeric",
+            hour12: false,
+            timeZone: "Asia/Seoul",
+          }),
+        );
+        const kstDate = now.toLocaleDateString("ko-KR", {
+          timeZone: "Asia/Seoul",
+        });
+
+        if (kstHour === dailyReportHour && lastDailyReportDate !== kstDate) {
+          lastDailyReportDate = kstDate;
+          console.log(
+            chalk.gray(`[${timestamp}]`),
+            chalk.blue("Sending daily report..."),
+          );
+          await sendDailyReport(webhookUrl, snapshot);
+          console.log(
+            chalk.gray(`[${timestamp}]`),
+            chalk.blue("Daily report sent."),
+          );
+        }
+      };
 
       const runOnce = async () => {
         const timestamp = new Date().toLocaleTimeString("ko-KR", {
@@ -208,7 +248,7 @@ program
                 ),
               );
 
-              await sendDiscordAlert(webhookUrl, quota, threshold);
+              await sendDiscordAlert(webhookUrl, quota, threshold, snapshot);
               state[quota.period] = [...alertedThresholds, threshold];
               alertsSent++;
             }
@@ -219,6 +259,8 @@ program
           }
 
           saveAlertState(state);
+
+          await checkDailyReport(snapshot, timestamp);
 
           if (alertsSent === 0) {
             console.log(
@@ -243,7 +285,7 @@ program
       const intervalMs = parseInt(options.interval) * 60 * 1000;
       console.log(
         chalk.cyan(
-          `🔍 Monitoring quotas (every ${options.interval} min). Ctrl+C to exit.`,
+          `🔍 Monitoring quotas (every ${options.interval} min, daily report at ${dailyReportHour}:00 KST). Ctrl+C to exit.`,
         ),
       );
 
