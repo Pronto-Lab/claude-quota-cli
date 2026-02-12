@@ -35,37 +35,43 @@ export async function sendDiscordAlert(
     emoji = "🟢";
   }
 
+  const periodLabel = quota.period === "5-hour" ? "5시간" : "7일";
+
   const fields: Array<{ name: string; value: string; inline: boolean }> = [
     {
-      name: "Utilization",
+      name: "구간",
+      value: periodLabel,
+      inline: true,
+    },
+    {
+      name: "사용량",
       value: `${quota.utilization.toFixed(1)}%`,
       inline: true,
     },
     {
-      name: "Reset In",
+      name: "리셋까지",
       value: quota.timeUntilResetFormatted,
       inline: true,
     },
-    { name: "Reset At", value: quota.resetTimeDisplay, inline: true },
+    { name: "리셋 시각", value: quota.resetTimeDisplay, inline: true },
   ];
 
-  // Include 7-day info when alerting on 5-hour window
   if (quota.period === "5-hour" && snapshot?.sevenDay) {
     const sd = snapshot.sevenDay;
     fields.push(
-      { name: "\u200B", value: "**── 7-Day Window ──**", inline: false },
+      { name: "\u200B", value: "**── 주간 현황 ──**", inline: false },
       {
-        name: "Weekly Usage",
+        name: "주간 사용량",
         value: `${sd.utilization.toFixed(1)}%`,
         inline: true,
       },
       {
-        name: "Weekly Reset In",
+        name: "주간 리셋까지",
         value: sd.timeUntilResetFormatted,
         inline: true,
       },
       {
-        name: "Weekly Reset At",
+        name: "주간 리셋 시각",
         value: formatDateTimeKST(sd.resetTime),
         inline: true,
       },
@@ -73,8 +79,8 @@ export async function sendDiscordAlert(
   }
 
   const embed = {
-    title: `${emoji} Claude Quota Alert: ${quota.period}`,
-    description: `Usage exceeded **${threshold}%**`,
+    title: `${emoji} Claude Quota Alert`,
+    description: `${periodLabel} 사용량이 **${threshold}%**를 초과했습니다`,
     color,
     fields,
     timestamp: new Date().toISOString(),
@@ -102,17 +108,17 @@ export async function sendDailyReport(
     const bar = makeBar(fh.utilization);
     fields.push(
       {
-        name: "⏱️ 5-Hour Window",
+        name: "⏱️ 5시간 사용량",
         value: `${bar} **${fh.utilization.toFixed(1)}%**`,
         inline: false,
       },
       {
-        name: "Reset In",
+        name: "리셋까지",
         value: fh.timeUntilResetFormatted,
         inline: true,
       },
       {
-        name: "Reset At",
+        name: "리셋 시각",
         value: fh.resetTimeDisplay,
         inline: true,
       },
@@ -125,17 +131,17 @@ export async function sendDailyReport(
     const bar = makeBar(sd.utilization);
     fields.push(
       {
-        name: "📅 7-Day Window",
+        name: "📅 주간 사용량",
         value: `${bar} **${sd.utilization.toFixed(1)}%**`,
         inline: false,
       },
       {
-        name: "Reset In",
+        name: "리셋까지",
         value: sd.timeUntilResetFormatted,
         inline: true,
       },
       {
-        name: "Reset At",
+        name: "리셋 시각",
         value: formatDateTimeKST(sd.resetTime),
         inline: true,
       },
@@ -145,7 +151,7 @@ export async function sendDailyReport(
 
   const embed = {
     title: "📊 Claude Daily Quota Report",
-    description: `Daily status update — ${formatDateKST(new Date())}`,
+    description: `일일 현황 리포트 — ${formatDateKST(new Date())}`,
     color: 0x5865f2,
     fields,
     footer: { text: "claude-quota-cli" },
