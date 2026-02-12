@@ -9,6 +9,16 @@ export interface Config {
   sessionKey: string;
   organizationId: string;
   discordWebhook?: string;
+  discordWebhooks?: string[];
+}
+
+export function getWebhookUrls(config: Config): string[] {
+  const urls = new Set<string>();
+  if (config.discordWebhook) urls.add(config.discordWebhook);
+  if (config.discordWebhooks) {
+    for (const url of config.discordWebhooks) urls.add(url);
+  }
+  return [...urls];
 }
 
 export interface AlertState {

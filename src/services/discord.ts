@@ -12,12 +12,37 @@ export function getThresholdForPercentage(utilization: number): number | null {
   return null;
 }
 
+async function postToWebhooks(
+  webhookUrls: string[],
+  body: Record<string, unknown>,
+): Promise<void> {
+  const results = await Promise.allSettled(
+    webhookUrls.map(async (url) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        throw new Error(`Discord webhook failed (${response.status}): ${url}`);
+      }
+    }),
+  );
+  const failures = results.filter((r) => r.status === "rejected");
+  if (failures.length === webhookUrls.length) {
+    throw new Error(
+      `All webhooks failed: ${(failures[0] as PromiseRejectedResult).reason}`,
+    );
+  }
+}
+
 export async function sendDiscordAlert(
-  webhookUrl: string,
+  webhookUrls: string | string[],
   quota: ModelQuota,
   threshold: number,
   snapshot?: QuotaSnapshot,
 ): Promise<void> {
+  const urls = Array.isArray(webhookUrls) ? webhookUrls : [webhookUrls];
   let color: number;
   let emoji: string;
 
@@ -86,21 +111,14 @@ export async function sendDiscordAlert(
     timestamp: new Date().toISOString(),
   };
 
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ embeds: [embed] }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Discord webhook failed: ${response.status}`);
-  }
+  await postToWebhooks(urls, { embeds: [embed] });
 }
 
 export async function sendDailyReport(
-  webhookUrl: string,
+  webhookUrls: string | string[],
   snapshot: QuotaSnapshot,
 ): Promise<void> {
+  const urls = Array.isArray(webhookUrls) ? webhookUrls : [webhookUrls];
   const fields: Array<{ name: string; value: string; inline: boolean }> = [];
 
   if (snapshot.fiveHour) {
@@ -158,15 +176,7 @@ export async function sendDailyReport(
     timestamp: new Date().toISOString(),
   };
 
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ embeds: [embed] }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Discord daily report webhook failed: ${response.status}`);
-  }
+  await postToWebhooks(urls, { embeds: [embed] });
 }
 
 function makeBar(pct: number): string {

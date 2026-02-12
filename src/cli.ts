@@ -11,6 +11,7 @@ import {
   saveAlertState,
   resetAlertState,
   getConfigPath,
+  getWebhookUrls,
   type Config,
 } from "./services/config.js";
 import {
@@ -37,19 +38,51 @@ program
   .requiredOption("--session-key <key>", "Claude.ai sessionKey cookie value")
   .requiredOption("--org-id <id>", "Claude.ai organization ID")
   .option("--webhook <url>", "Discord webhook URL for alerts")
+  .option("--webhook-add <url>", "Add an additional Discord webhook URL")
+  .option("--webhook-remove <url>", "Remove a Discord webhook URL")
+  .option("--webhook-list", "List configured webhook URLs")
   .action(
     (options: {
       sessionKey: string;
       orgId: string;
       webhook?: string;
+      webhookAdd?: string;
+      webhookRemove?: string;
+      webhookList?: boolean;
     }) => {
+      const existing = loadConfig();
+
+      if (options.webhookList && existing) {
+        const urls = getWebhookUrls(existing);
+        if (urls.length === 0) {
+          console.log(chalk.yellow("No webhooks configured."));
+        } else {
+          console.log(chalk.cyan("Configured webhooks:"));
+          urls.forEach((url, i) => console.log(`  ${i + 1}. ${url}`));
+        }
+        return;
+      }
+
+      const webhooks = new Set<string>(existing?.discordWebhooks || []);
+      if (existing?.discordWebhook) webhooks.add(existing.discordWebhook);
+      if (options.webhook) webhooks.add(options.webhook);
+      if (options.webhookAdd) webhooks.add(options.webhookAdd);
+      if (options.webhookRemove) webhooks.delete(options.webhookRemove);
+
+      const webhookArray = [...webhooks];
+
       const config: Config = {
         sessionKey: options.sessionKey,
         organizationId: options.orgId,
-        ...(options.webhook ? { discordWebhook: options.webhook } : {}),
+        ...(webhookArray.length > 0
+          ? { discordWebhooks: webhookArray }
+          : {}),
       };
       saveConfig(config);
       console.log(chalk.green("✓ Configuration saved to " + getConfigPath()));
+      if (webhookArray.length > 0) {
+        console.log(chalk.gray(`  ${webhookArray.length} webhook(s) configured`));
+      }
     },
   );
 
@@ -171,9 +204,11 @@ program
         process.exit(1);
       }
 
-      const webhookUrl =
-        options.webhook || config.discordWebhook || process.env.DISCORD_WEBHOOK;
-      if (!webhookUrl) {
+      const webhookUrls = getWebhookUrls(config);
+      if (options.webhook) webhookUrls.push(options.webhook);
+      if (process.env.DISCORD_WEBHOOK) webhookUrls.push(process.env.DISCORD_WEBHOOK);
+      const uniqueUrls = [...new Set(webhookUrls)];
+      if (uniqueUrls.length === 0) {
         console.error(
           chalk.red(
             "Discord webhook required. Use --webhook, config, or DISCORD_WEBHOOK env var.",
@@ -214,7 +249,7 @@ program
             chalk.gray(`[${timestamp}]`),
             chalk.blue("Sending daily report..."),
           );
-          await sendDailyReport(webhookUrl, snapshot);
+          await sendDailyReport(uniqueUrls, snapshot);
           console.log(
             chalk.gray(`[${timestamp}]`),
             chalk.blue("Daily report sent."),
@@ -248,7 +283,7 @@ program
                 ),
               );
 
-              await sendDiscordAlert(webhookUrl, quota, threshold, snapshot);
+              await sendDiscordAlert(uniqueUrls, quota, threshold, snapshot);
               state[quota.period] = [...alertedThresholds, threshold];
               alertsSent++;
             }
